@@ -1,16 +1,17 @@
 import csv
 import io
 import json
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 from flask import Blueprint, render_template, redirect, url_for, flash, request, abort, Response
 from flask_login import login_required, current_user
-from sqlalchemy import func
+from bson import ObjectId
 
-from app import db
-from app.models.estimate import Estimate, EstimateItem
-from app.models.asset import Asset
-from app.models.settings import AppSetting
+from app.db import (
+    all_estimates, get_estimate, estimates_col, est_items_col,
+    assets_col, all_assets, next_allocation_number, setting_get, all_settings,
+    _hydrate_asset,
+)
 
 estimates_bp = Blueprint('estimates', __name__, url_prefix='/estimates')
 
@@ -18,39 +19,35 @@ estimates_bp = Blueprint('estimates', __name__, url_prefix='/estimates')
 @estimates_bp.route('/')
 @login_required
 def list_estimates():
-    estimates = (Estimate.query
-                 .filter_by(status='pending')
-                 .order_by(Estimate.created_at.desc())
-                 .all())
+    estimates = all_estimates({'status': 'pending'})
     return render_template('estimates/list.html', estimates=estimates)
 
 
 @estimates_bp.route('/history')
 @login_required
 def history():
-    estimates = (Estimate.query
-                 .filter_by(status='withdrawn')
-                 .order_by(Estimate.created_at.desc())
-                 .all())
+    estimates = all_estimates({'status': 'withdrawn'})
     return render_template('estimates/history.html', estimates=estimates)
 
 
-@estimates_bp.route('/<int:id>/withdraw', methods=['POST'])
+@estimates_bp.route('/<id>/withdraw', methods=['POST'])
 @login_required
 def withdraw(id):
-    estimate = Estimate.query.get_or_404(id)
-    estimate.status = 'withdrawn'
-    db.session.commit()
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
+    estimates_col().update_one({'_id': ObjectId(id)}, {'$set': {'status': 'withdrawn'}})
     flash(f'Assignment {estimate.allocation_number} marked as ongoing and moved to History.', 'success')
     return redirect(url_for('estimates.detail', id=id))
 
 
-@estimates_bp.route('/<int:id>/restore', methods=['POST'])
+@estimates_bp.route('/<id>/restore', methods=['POST'])
 @login_required
 def restore(id):
-    estimate = Estimate.query.get_or_404(id)
-    estimate.status = 'pending'
-    db.session.commit()
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
+    estimates_col().update_one({'_id': ObjectId(id)}, {'$set': {'status': 'pending'}})
     flash(f'Assignment {estimate.allocation_number} restored to Pending.', 'success')
     return redirect(url_for('estimates.detail', id=id))
 
@@ -58,7 +55,7 @@ def restore(id):
 @estimates_bp.route('/new', methods=['GET', 'POST'])
 @login_required
 def new_estimate():
-    usd_rate = AppSetting.get('usd_rate') or 3.0
+    usd_rate = setting_get('usd_rate') or 3.0
     today    = date.today()
     validity = today + timedelta(days=90)
 
@@ -76,60 +73,54 @@ def new_estimate():
         except (json.JSONDecodeError, TypeError):
             items_data = []
 
-        last_num = db.session.query(func.max(Estimate.allocation_number)).scalar()
-        next_num = (last_num or 0) + 1
-
-        estimate = Estimate(
-            allocation_number=next_num,
-            task_name=task_name,
-            project_name=project_name or None,
-            created_date=today,
-            valid_until=validity,
-            usd_rate=usd_rate,
-            created_by_id=current_user.id,
-        )
-        db.session.add(estimate)
-        db.session.flush()
+        est_result = estimates_col().insert_one({
+            'allocation_number': next_allocation_number(),
+            'task_name':         task_name,
+            'project_name':      project_name or None,
+            'status':            'pending',
+            'created_date':      datetime.combine(today, datetime.min.time()),
+            'valid_until':       datetime.combine(validity, datetime.min.time()),
+            'usd_rate':          float(usd_rate),
+            'created_by_id':     current_user.id,
+            'created_at':        datetime.utcnow(),
+        })
+        est_id = str(est_result.inserted_id)
 
         total_nis = 0.0
         for item in items_data:
-            try:
-                asset_id = int(item['asset_id'])
-                qty      = max(1, int(item.get('quantity', 1)))
-            except (KeyError, ValueError, TypeError):
+            asset_id = item.get('asset_id')
+            qty      = max(1, int(item.get('quantity', 1)))
+            doc = assets_col().find_one({'_id': ObjectId(asset_id)}) if asset_id else None
+            if not doc or not doc.get('price_usd'):
                 continue
-            asset = Asset.query.get(asset_id)
-            if not asset or not asset.price_usd:
-                continue
-            unit_usd = float(asset.price_usd)
+            unit_usd = float(doc['price_usd'])
             line_nis = round(unit_usd * float(usd_rate) * 1.7 * 1.18 * qty, 2)
             total_nis += line_nis
-            db.session.add(EstimateItem(
-                estimate_id=estimate.id,
-                asset_id=asset_id,
-                quantity=qty,
-                unit_price_usd=unit_usd,
-            ))
+            est_items_col().insert_one({
+                'estimate_id':    est_id,
+                'asset_id':       asset_id,
+                'quantity':       qty,
+                'unit_price_usd': unit_usd,
+            })
 
-        estimate.total_nis = round(total_nis, 2)
-        db.session.commit()
+        estimates_col().update_one(
+            {'_id': ObjectId(est_id)},
+            {'$set': {'total_nis': round(total_nis, 2)}},
+        )
         flash(f'Estimate "{task_name}" saved successfully.', 'success')
         return redirect(url_for('estimates.list_estimates'))
 
-    # Build asset catalogue for JS selector (only assets with a USD price)
-    assets = (Asset.query
-              .filter(Asset.price_usd.isnot(None))
-              .order_by(Asset.serial_number)
-              .all())
+    assets = [_hydrate_asset(d) for d in
+              assets_col().find({'price_usd': {'$ne': None}}).sort('serial_number', 1)]
     assets_json = json.dumps([{
-        'id':           a.id,
-        'component_id': a.component_id or '',
+        'id':            a.id,
+        'component_id':  a.component_id or '',
         'serial_number': a.serial_number,
-        'model':        a.model or '',
-        'manufacturer': a.manufacturer or '',
-        'type':         a.asset_type.name if a.asset_type else '',
-        'price_usd':    float(a.price_usd),
-        'quantity':     a.quantity if a.quantity is not None else 0,
+        'model':         a.model or '',
+        'manufacturer':  a.manufacturer or '',
+        'type':          a.asset_type.name if a.asset_type else '',
+        'price_usd':     float(a.price_usd),
+        'quantity':      a.quantity if a.quantity is not None else 0,
     } for a in assets])
 
     return render_template('estimates/new.html',
@@ -139,17 +130,21 @@ def new_estimate():
                            valid_until=validity)
 
 
-@estimates_bp.route('/<int:id>')
+@estimates_bp.route('/<id>')
 @login_required
 def detail(id):
-    estimate = Estimate.query.get_or_404(id)
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
     return render_template('estimates/detail.html', estimate=estimate)
 
 
-@estimates_bp.route('/<int:id>/edit', methods=['GET', 'POST'])
+@estimates_bp.route('/<id>/edit', methods=['GET', 'POST'])
 @login_required
 def edit(id):
-    estimate = Estimate.query.get_or_404(id)
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
     usd_rate = float(estimate.usd_rate)
 
     if request.method == 'POST':
@@ -166,42 +161,38 @@ def edit(id):
         except (json.JSONDecodeError, TypeError):
             items_data = []
 
-        estimate.task_name    = task_name
-        estimate.project_name = project_name or None
-
-        for item in list(estimate.items):
-            db.session.delete(item)
-        db.session.flush()
+        est_items_col().delete_many({'estimate_id': id})
 
         total_nis = 0.0
         for item in items_data:
-            try:
-                asset_id = int(item['asset_id'])
-                qty      = max(1, int(item.get('quantity', 1)))
-            except (KeyError, ValueError, TypeError):
+            asset_id = item.get('asset_id')
+            qty      = max(1, int(item.get('quantity', 1)))
+            doc = assets_col().find_one({'_id': ObjectId(asset_id)}) if asset_id else None
+            if not doc or not doc.get('price_usd'):
                 continue
-            asset = Asset.query.get(asset_id)
-            if not asset or not asset.price_usd:
-                continue
-            unit_usd = float(asset.price_usd)
+            unit_usd = float(doc['price_usd'])
             line_nis = round(unit_usd * usd_rate * 1.7 * 1.18 * qty, 2)
             total_nis += line_nis
-            db.session.add(EstimateItem(
-                estimate_id=estimate.id,
-                asset_id=asset_id,
-                quantity=qty,
-                unit_price_usd=unit_usd,
-            ))
+            est_items_col().insert_one({
+                'estimate_id':    id,
+                'asset_id':       asset_id,
+                'quantity':       qty,
+                'unit_price_usd': unit_usd,
+            })
 
-        estimate.total_nis = round(total_nis, 2)
-        db.session.commit()
+        estimates_col().update_one(
+            {'_id': ObjectId(id)},
+            {'$set': {
+                'task_name':    task_name,
+                'project_name': project_name or None,
+                'total_nis':    round(total_nis, 2),
+            }},
+        )
         flash('Estimate updated successfully.', 'success')
         return redirect(url_for('estimates.detail', id=id))
 
-    assets = (Asset.query
-              .filter(Asset.price_usd.isnot(None))
-              .order_by(Asset.serial_number)
-              .all())
+    assets = [_hydrate_asset(d) for d in
+              assets_col().find({'price_usd': {'$ne': None}}).sort('serial_number', 1)]
     assets_json = json.dumps([{
         'id':            a.id,
         'component_id':  a.component_id or '',
@@ -225,19 +216,24 @@ def edit(id):
                            usd_rate=usd_rate)
 
 
-@estimates_bp.route('/<int:id>/export.csv')
+@estimates_bp.route('/<id>/export.csv')
 @login_required
 def export_csv(id):
-    estimate = Estimate.query.get_or_404(id)
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
     buf = io.StringIO()
     w = csv.writer(buf)
+    created = estimate.created_date
+    valid   = estimate.valid_until
     w.writerow(['Allocation Number', estimate.allocation_number or ''])
-    w.writerow(['Requester Name', estimate.task_name])
-    w.writerow(['Project', estimate.project_name or ''])
-    w.writerow(['Date', estimate.created_date.strftime('%d %b %Y')])
-    w.writerow(['Valid Until', estimate.valid_until.strftime('%d %b %Y')])
+    w.writerow(['Requester Name',    estimate.task_name])
+    w.writerow(['Project',           estimate.project_name or ''])
+    w.writerow(['Date',       created.strftime('%d %b %Y') if created else ''])
+    w.writerow(['Valid Until', valid.strftime('%d %b %Y')   if valid   else ''])
     w.writerow([])
-    w.writerow(['Part No.', 'Description', 'Type', 'Qty', 'Unit Price (USD)', 'Unit Price (ILS)', 'Line Total (ILS)'])
+    w.writerow(['Part No.', 'Description', 'Type', 'Qty',
+                'Unit Price (USD)', 'Unit Price (ILS)', 'Line Total (ILS)'])
     rate = float(estimate.usd_rate)
     for item in estimate.items:
         unit_usd = float(item.unit_price_usd) if item.unit_price_usd else 0.0
@@ -245,7 +241,7 @@ def export_csv(id):
         line_ils = round(unit_ils * item.quantity, 2)
         w.writerow([
             item.asset.serial_number if item.asset else '',
-            item.asset.model if item.asset else '',
+            item.asset.model         if item.asset else '',
             item.asset.asset_type.name if item.asset and item.asset.asset_type else '',
             item.quantity,
             f'{unit_usd:.2f}',
@@ -253,8 +249,11 @@ def export_csv(id):
             f'{line_ils:.2f}',
         ])
     w.writerow([])
-    w.writerow(['', '', '', '', '', 'TOTAL (ILS)', estimate.formatted_total.replace(' ₪', '')])
-    filename = f"estimate_{estimate.task_name.replace(' ', '_')}_{estimate.created_date}.csv"
+    w.writerow(['', '', '', '', '', 'TOTAL (ILS)',
+                estimate.formatted_total.replace(' ₪', '')])
+    task_name = estimate.task_name or 'estimate'
+    created_str = created.strftime('%Y-%m-%d') if created else 'unknown'
+    filename = f"estimate_{task_name.replace(' ', '_')}_{created_str}.csv"
     return Response(
         buf.getvalue(),
         mimetype='text/csv',
@@ -262,14 +261,16 @@ def export_csv(id):
     )
 
 
-@estimates_bp.route('/<int:id>/delete', methods=['POST'])
+@estimates_bp.route('/<id>/delete', methods=['POST'])
 @login_required
 def delete(id):
     if not current_user.is_admin:
         abort(403)
-    estimate = Estimate.query.get_or_404(id)
+    estimate = get_estimate(id)
+    if not estimate:
+        abort(404)
     name = estimate.task_name
-    db.session.delete(estimate)
-    db.session.commit()
+    est_items_col().delete_many({'estimate_id': id})
+    estimates_col().delete_one({'_id': ObjectId(id)})
     flash(f'Estimate "{name}" deleted.', 'info')
     return redirect(url_for('estimates.list_estimates'))

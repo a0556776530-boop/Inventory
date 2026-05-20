@@ -4,8 +4,9 @@ from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired, Email, Length
 
-from app import db, bcrypt
-from app.models.user import User
+from app import bcrypt
+from app.db import find_user_by_email, users_col
+from bson import ObjectId
 from app.utils.translations import localize_form
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
@@ -32,7 +33,7 @@ def login():
     form = LoginForm()
     localize_form(form, t, submit_key='form_sign_in')
     if form.validate_on_submit():
-        user = User.query.filter_by(email=form.email.data.lower().strip()).first()
+        user = find_user_by_email(form.email.data.lower().strip())
         if user and bcrypt.check_password_hash(user.password_hash, form.password.data):
             login_user(user, remember=form.remember.data)
             next_page = request.args.get('next')
@@ -61,10 +62,11 @@ def change_password():
         if not bcrypt.check_password_hash(current_user.password_hash, form.current_password.data):
             flash(t.get('flash_wrong_password', 'Current password is incorrect.'), 'danger')
         else:
-            current_user.password_hash = bcrypt.generate_password_hash(
-                form.new_password.data
-            ).decode('utf-8')
-            db.session.commit()
+            new_hash = bcrypt.generate_password_hash(form.new_password.data).decode('utf-8')
+            users_col().update_one(
+                {'_id': ObjectId(current_user.id)},
+                {'$set': {'password_hash': new_hash}},
+            )
             flash(t.get('flash_password_changed', 'Password changed successfully.'), 'success')
             return redirect(url_for('main.dashboard'))
     return render_template('auth/change_password.html', form=form)

@@ -3,26 +3,30 @@ from datetime import date, timedelta, datetime
 
 from flask import Blueprint, render_template, jsonify, redirect, request, session, url_for
 from flask_login import login_required
-from sqlalchemy import func
 
-from app import db
-from app.models.asset import Asset, AssetEvent, AssetType
-from app.models.task import Task
+from app.db import (
+    assets_col, events_col, tasks_col, est_items_col, estimates_col,
+    get_asset_events, get_asset_type, all_settings, setting_set, setting_get,
+)
 
 main_bp = Blueprint('main', __name__)
 
 _STATUS_COLORS = {
-    'in_use':     '#198754',
-    'dismantled': '#ffc107',
-    'in_storage': '#0dcaf0',
-    'assigned':   '#0d6efd',
-    'faulty':     '#dc3545',
-    'retired':    '#adb5bd',
+    'in_use': '#198754', 'dismantled': '#ffc107', 'in_storage': '#0dcaf0',
+    'assigned': '#0d6efd', 'faulty': '#dc3545', 'retired': '#adb5bd',
 }
 _STATUS_LABELS = {
     'in_use': 'In Use', 'dismantled': 'Dismantled', 'in_storage': 'In Storage',
     'assigned': 'Assigned', 'faulty': 'Faulty', 'retired': 'Retired',
 }
+
+
+@main_bp.route('/api/mongo-health')
+def mongo_health():
+    from app.utils.mongo import ping_mongo
+    if ping_mongo():
+        return jsonify({'status': 'ok', 'message': 'החיבור למונגו עובד פיקס!'})
+    return jsonify({'status': 'error', 'message': 'החיבור למונגו נכשל'}), 500
 
 
 @main_bp.route('/set-lang/<code>')
@@ -44,23 +48,19 @@ def exchange_rate():
 @main_bp.route('/api/settings', methods=['GET'])
 @login_required
 def get_settings():
-    from app.models.settings import AppSetting
-    return jsonify(AppSetting.all_as_dict())
+    return jsonify(all_settings())
 
 
 @main_bp.route('/api/settings', methods=['POST'])
 @login_required
 def save_settings():
-    from app.models.settings import AppSetting
     data = request.get_json(silent=True) or {}
-    allowed = ('usd_rate',)
-    for key in allowed:
+    for key in ('usd_rate',):
         if key in data:
             try:
-                AppSetting.set(key, float(data[key]))
+                setting_set(key, float(data[key]))
             except (ValueError, TypeError):
                 pass
-    db.session.commit()
     return jsonify({'ok': True})
 
 
@@ -69,23 +69,29 @@ def save_settings():
 def dashboard():
     today = date.today()
 
-    total_assets = Asset.query.count()
-    status_counts = dict(
-        db.session.query(Asset.status, func.count(Asset.id))
-        .group_by(Asset.status).all()
+    total_assets = assets_col().count_documents({})
+
+    status_pipeline = [{'$group': {'_id': '$status', 'count': {'$sum': 1}}}]
+    status_counts = {r['_id']: r['count'] for r in assets_col().aggregate(status_pipeline)}
+
+    open_tasks_count = tasks_col().count_documents({'status': {'$ne': 'done'}})
+
+    low_stock_docs = (
+        assets_col()
+        .find({'quantity': {'$ne': None, '$lt': 5}})
+        .sort('quantity', 1)
+        .limit(20)
     )
+    from app.db import _hydrate_asset
+    low_stock_assets = [_hydrate_asset(d) for d in low_stock_docs]
 
-    recent_events = (
-        AssetEvent.query.order_by(AssetEvent.event_date.desc()).limit(15).all()
+    recent_events_raw = (
+        events_col().find().sort('event_date', -1).limit(15)
     )
+    from app.db import _hydrate_event
+    recent_events = [_hydrate_event(d) for d in recent_events_raw]
 
-    open_tasks_count = Task.query.filter(Task.status != 'done').count()
-
-    low_stock_assets = Asset.query.filter(
-        Asset.quantity != None, Asset.quantity < 5
-    ).order_by(Asset.quantity.asc()).limit(20).all()
-
-    # ── Chart: assets by status (doughnut) ───────────────────────────────────
+    # ── Chart: assets by status ───────────────────────────────────────────────
     all_statuses = ['in_use', 'dismantled', 'in_storage', 'assigned', 'faulty', 'retired']
     status_chart = {
         'labels': [_STATUS_LABELS[s] for s in all_statuses],
@@ -93,29 +99,32 @@ def dashboard():
         'colors': [_STATUS_COLORS[s] for s in all_statuses],
     }
 
-    # ── Chart: top asset types (horizontal bar) ───────────────────────────────
-    type_rows = (
-        db.session.query(AssetType.name, func.count(Asset.id))
-        .outerjoin(Asset, Asset.asset_type_id == AssetType.id)
-        .group_by(AssetType.name)
-        .order_by(func.count(Asset.id).desc())
-        .limit(8).all()
-    )
+    # ── Chart: top asset types ────────────────────────────────────────────────
+    type_pipeline = [
+        {'$group': {'_id': '$asset_type_id', 'count': {'$sum': 1}}},
+        {'$sort': {'count': -1}},
+        {'$limit': 8},
+    ]
+    type_chart_rows = []
+    for row in assets_col().aggregate(type_pipeline):
+        atype = get_asset_type(row['_id'])
+        if atype:
+            type_chart_rows.append((atype.name, row['count']))
+
     type_chart = {
-        'labels': [r[0] for r in type_rows],
-        'data':   [r[1] for r in type_rows],
+        'labels': [r[0] for r in type_chart_rows],
+        'data':   [r[1] for r in type_chart_rows],
     }
 
-    # ── Chart: events per day — last 14 days (line) ───────────────────────────
+    # ── Chart: events per day — last 14 days ─────────────────────────────────
     activity_labels, activity_data = [], []
     for i in range(13, -1, -1):
         day = today - timedelta(days=i)
         day_start = datetime.combine(day, datetime.min.time())
         day_end   = datetime.combine(day, datetime.max.time())
-        count = AssetEvent.query.filter(
-            AssetEvent.event_date >= day_start,
-            AssetEvent.event_date <= day_end,
-        ).count()
+        count = events_col().count_documents({
+            'event_date': {'$gte': day_start, '$lte': day_end},
+        })
         activity_labels.append(day.strftime('%d %b'))
         activity_data.append(count)
 

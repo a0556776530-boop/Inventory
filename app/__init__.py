@@ -1,16 +1,12 @@
 from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
 from flask_login import LoginManager
 from flask_bcrypt import Bcrypt
 from flask_mail import Mail
 from flask_wtf.csrf import CSRFProtect
-
 import click
+
 from .config import Config
 
-db = SQLAlchemy()
-migrate = Migrate()
 login_manager = LoginManager()
 bcrypt = Bcrypt()
 mail = Mail()
@@ -21,8 +17,6 @@ def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
 
-    db.init_app(app)
-    migrate.init_app(app, db)
     login_manager.init_app(app)
     bcrypt.init_app(app)
     mail.init_app(app)
@@ -32,8 +26,10 @@ def create_app(config_class=Config):
     login_manager.login_message = 'Please log in to access this page.'
     login_manager.login_message_category = 'warning'
 
-    # Import models so Flask-Migrate detects them
-    from .models import user, asset, site, task, settings, estimate  # noqa: F401
+    @login_manager.user_loader
+    def load_user(user_id):
+        from app.db import get_user
+        return get_user(user_id)
 
     from .routes.auth import auth_bp
     from .routes.main import main_bp
@@ -78,9 +74,6 @@ def create_app(config_class=Config):
             't': getattr(g, 't', TRANSLATIONS['en']),
         }
 
-    # CLI: flask seed-db / flask send-reminders
-    from .seed import register_commands
-    register_commands(app)
     _register_email_commands(app)
 
     return app
@@ -89,7 +82,6 @@ def create_app(config_class=Config):
 def _register_email_commands(app):
     @app.cli.command('send-reminders')
     def send_reminders():
-        """Send due date reminder emails to all users with overdue/upcoming items."""
         from .utils.email import send_due_reminders
         count = send_due_reminders()
         click.echo(f'Sent {count} reminder email(s).')

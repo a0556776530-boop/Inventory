@@ -4,7 +4,7 @@ from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired, Email, Length
 
-from app import bcrypt
+from app import bcrypt, csrf
 from app.db import find_user_by_email, users_col
 from bson import ObjectId
 from app.utils.translations import localize_form
@@ -13,29 +13,32 @@ auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
 
 
 class LoginForm(FlaskForm):
-    email = StringField('Email', validators=[DataRequired(), Email(check_deliverability=False)])
+    email    = StringField('Email',    validators=[DataRequired(), Email(check_deliverability=False)])
     password = PasswordField('Password', validators=[DataRequired()])
     remember = BooleanField('Remember me')
-    submit = SubmitField('Sign In')
+    submit   = SubmitField('Sign In')
 
 
 class ChangePasswordForm(FlaskForm):
     current_password = PasswordField('Current Password', validators=[DataRequired()])
-    new_password = PasswordField('New Password', validators=[DataRequired(), Length(min=8)])
-    submit = SubmitField('Save Password')
+    new_password     = PasswordField('New Password',     validators=[DataRequired(), Length(min=6)])
+    submit           = SubmitField('Save Password')
 
 
 @auth_bp.route('/login', methods=['GET', 'POST'])
+@csrf.exempt
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('main.dashboard'))
-    t = getattr(g, 't', {})
+    t    = getattr(g, 't', {})
     form = LoginForm()
     localize_form(form, t, submit_key='form_sign_in')
-    if form.validate_on_submit():
-        user = find_user_by_email(form.email.data.lower().strip())
-        if user and bcrypt.check_password_hash(user.password_hash, form.password.data):
-            login_user(user, remember=form.remember.data)
+    if request.method == 'POST':
+        email = request.form.get('email', '').lower().strip()
+        pwd   = request.form.get('password', '')
+        user  = find_user_by_email(email)
+        if user and bcrypt.check_password_hash(user.password_hash, pwd):
+            login_user(user, remember='remember' in request.form)
             next_page = request.args.get('next')
             flash(t.get('flash_welcome', 'Welcome back, {name}!').format(name=user.name), 'success')
             return redirect(next_page or url_for('main.dashboard'))
@@ -55,7 +58,7 @@ def logout():
 @auth_bp.route('/change-password', methods=['GET', 'POST'])
 @login_required
 def change_password():
-    t = getattr(g, 't', {})
+    t    = getattr(g, 't', {})
     form = ChangePasswordForm()
     localize_form(form, t, submit_key='form_save_password')
     if form.validate_on_submit():

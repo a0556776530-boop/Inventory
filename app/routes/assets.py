@@ -458,3 +458,19 @@ def retire(id):
     flash(t.get('flash_retired', '{sn} retired from service.').format(
         sn=asset.serial_number), 'secondary')
     return redirect(url_for('assets.detail', id=id))
+
+
+@assets_bp.route('/<id>/delete', methods=['POST'])
+@login_required
+def delete_asset(id):
+    if not current_user.is_admin:
+        abort(403)
+    asset = get_asset(id)
+    if not asset:
+        abort(404)
+    sn = asset.serial_number
+    from app.db import events_col
+    events_col().delete_many({'asset_id': id})
+    assets_col().delete_one({'_id': ObjectId(id)})
+    flash(f'Asset "{sn}" permanently deleted.', 'warning')
+    return redirect(url_for('assets.list_assets'))

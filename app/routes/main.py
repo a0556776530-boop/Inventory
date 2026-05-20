@@ -78,7 +78,10 @@ def dashboard():
 
     low_stock_docs = (
         assets_col()
-        .find({'quantity': {'$ne': None, '$lt': 5}})
+        .find({
+            'quantity': {'$ne': None},
+            '$expr': {'$lte': ['$quantity', {'$ifNull': ['$min_threshold', 5]}]},
+        })
         .sort('quantity', 1)
         .limit(20)
     )

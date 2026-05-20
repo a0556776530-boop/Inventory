@@ -1,7 +1,7 @@
 """
 MongoDB query layer — replaces SQLAlchemy ORM.
-All reference IDs are stored as plain strings (str(ObjectId)) so they pass
-through forms and templates without any ObjectId ↔ string conversion.
+All reference IDs are stored as plain strings (str(ObjectId)).
+Batch-loading eliminates N+1 queries on list views.
 """
 from datetime import datetime
 from bson import ObjectId
@@ -36,10 +36,34 @@ def ensure_indexes():
     assets_col().create_index('serial_number', unique=True, sparse=True)
     assets_col().create_index('barcode',        unique=True, sparse=True)
     assets_col().create_index('status')
+    assets_col().create_index('asset_type_id')
+    assets_col().create_index('current_site_id')
+    assets_col().create_index('assigned_to_id')
+    assets_col().create_index('quantity')
     events_col().create_index('asset_id')
     events_col().create_index([('event_date', DESCENDING)])
     tasks_col().create_index('assigned_to_id')
+    tasks_col().create_index('status')
     estimates_col().create_index('status')
+    est_items_col().create_index('estimate_id')
+    est_items_col().create_index('asset_id')
+
+
+# ── Batch reference caches ─────────────────────────────────────────────────────
+
+def _load_all_types():
+    """Load all asset types into {id_str: MongoDoc} dict — 1 query."""
+    return {str(d['_id']): MongoDoc(d) for d in asset_types_col().find()}
+
+
+def _load_all_sites():
+    """Load all sites into {id_str: MongoDoc} dict — 1 query."""
+    return {str(d['_id']): MongoDoc(d) for d in sites_col().find()}
+
+
+def _load_all_users():
+    """Load all users into {id_str: MongoUser} dict — 1 query."""
+    return {str(d['_id']): MongoUser(d) for d in users_col().find()}
 
 
 # ── User helpers ───────────────────────────────────────────────────────────────
@@ -97,13 +121,28 @@ def all_asset_types():
 
 # ── Asset helpers ──────────────────────────────────────────────────────────────
 
-def _hydrate_asset(doc):
+def _hydrate_asset(doc, types_cache=None, sites_cache=None, users_cache=None):
+    """Hydrate a single asset doc. Uses caches when available (batch mode)."""
     if doc is None:
         return None
     asset = AssetDoc(doc)
-    asset.set_ref('asset_type',   get_asset_type(doc.get('asset_type_id')))
-    asset.set_ref('current_site', get_site(doc.get('current_site_id')))
-    asset.set_ref('assignee',     get_user(doc.get('assigned_to_id')) if doc.get('assigned_to_id') else None)
+
+    if types_cache is not None:
+        asset.set_ref('asset_type', types_cache.get(doc.get('asset_type_id')))
+    else:
+        asset.set_ref('asset_type', get_asset_type(doc.get('asset_type_id')))
+
+    if sites_cache is not None:
+        asset.set_ref('current_site', sites_cache.get(doc.get('current_site_id')))
+    else:
+        asset.set_ref('current_site', get_site(doc.get('current_site_id')))
+
+    if users_cache is not None:
+        asset.set_ref('assignee', users_cache.get(doc.get('assigned_to_id')))
+    else:
+        uid = doc.get('assigned_to_id')
+        asset.set_ref('assignee', get_user(uid) if uid else None)
+
     return asset
 
 
@@ -118,20 +157,38 @@ def get_asset(asset_id):
 
 
 def all_assets(query=None, sort_field='created_at', sort_order=DESCENDING):
-    docs = assets_col().find(query or {}).sort(sort_field, sort_order)
-    return [_hydrate_asset(d) for d in docs]
+    """Load all assets with batch-hydration: 4 DB queries total, not 3×N."""
+    types_cache = _load_all_types()
+    sites_cache = _load_all_sites()
+    users_cache = _load_all_users()
+    docs = list(assets_col().find(query or {}).sort(sort_field, sort_order))
+    return [_hydrate_asset(d, types_cache, sites_cache, users_cache) for d in docs]
 
 
 # ── AssetEvent helpers ─────────────────────────────────────────────────────────
 
-def _hydrate_event(doc):
+def _hydrate_event(doc, assets_cache=None, sites_cache=None, users_cache=None):
     if doc is None:
         return None
     event = AssetEventDoc(doc)
-    event.set_ref('asset',             get_asset(doc.get('asset_id')))
-    event.set_ref('from_site',         get_site(doc.get('from_site_id')))
-    event.set_ref('to_site',           get_site(doc.get('to_site_id')))
-    event.set_ref('performed_by_user', get_user(doc.get('performed_by_id')))
+
+    if assets_cache is not None:
+        event.set_ref('asset', assets_cache.get(doc.get('asset_id')))
+    else:
+        event.set_ref('asset', get_asset(doc.get('asset_id')))
+
+    if sites_cache is not None:
+        event.set_ref('from_site', sites_cache.get(doc.get('from_site_id')))
+        event.set_ref('to_site',   sites_cache.get(doc.get('to_site_id')))
+    else:
+        event.set_ref('from_site', get_site(doc.get('from_site_id')))
+        event.set_ref('to_site',   get_site(doc.get('to_site_id')))
+
+    if users_cache is not None:
+        event.set_ref('performed_by_user', users_cache.get(doc.get('performed_by_id')))
+    else:
+        event.set_ref('performed_by_user', get_user(doc.get('performed_by_id')))
+
     return event
 
 
@@ -141,7 +198,30 @@ def get_asset_events(asset_id, limit=None):
     cursor = events_col().find({'asset_id': asset_id}).sort('event_date', DESCENDING)
     if limit:
         cursor = cursor.limit(limit)
-    return [_hydrate_event(d) for d in cursor]
+    sites_cache = _load_all_sites()
+    users_cache = _load_all_users()
+    return [_hydrate_event(d, sites_cache=sites_cache, users_cache=users_cache) for d in cursor]
+
+
+def get_recent_events(limit=15):
+    """Batch-load recent events for dashboard — minimal queries."""
+    docs = list(events_col().find().sort('event_date', DESCENDING).limit(limit))
+    if not docs:
+        return []
+
+    asset_ids = list({d['asset_id'] for d in docs if d.get('asset_id')})
+    try:
+        asset_oid_map = {str(d['_id']): _hydrate_asset(d)
+                         for d in assets_col().find({'_id': {'$in': [ObjectId(i) for i in asset_ids]}})}
+    except Exception:
+        asset_oid_map = {}
+
+    sites_cache = _load_all_sites()
+    users_cache = _load_all_users()
+
+    return [_hydrate_event(d, assets_cache=asset_oid_map,
+                           sites_cache=sites_cache, users_cache=users_cache)
+            for d in docs]
 
 
 def log_event(asset_id, event_type, performed_by_id,
@@ -159,12 +239,23 @@ def log_event(asset_id, event_type, performed_by_id,
 
 # ── Task helpers ───────────────────────────────────────────────────────────────
 
-def _hydrate_task(doc):
+def _hydrate_task(doc, assets_cache=None, users_cache=None):
     if doc is None:
         return None
     task = TaskDoc(doc)
-    task.set_ref('asset',    get_asset(doc.get('asset_id')) if doc.get('asset_id') else None)
-    task.set_ref('assignee', get_user(doc.get('assigned_to_id')) if doc.get('assigned_to_id') else None)
+
+    if assets_cache is not None:
+        task.set_ref('asset', assets_cache.get(doc.get('asset_id')))
+    else:
+        aid = doc.get('asset_id')
+        task.set_ref('asset', get_asset(aid) if aid else None)
+
+    if users_cache is not None:
+        task.set_ref('assignee', users_cache.get(doc.get('assigned_to_id')))
+    else:
+        uid = doc.get('assigned_to_id')
+        task.set_ref('assignee', get_user(uid) if uid else None)
+
     return task
 
 
@@ -179,8 +270,22 @@ def get_task(task_id):
 
 
 def all_tasks(query=None, sort_field='created_at', sort_order=DESCENDING):
-    docs = tasks_col().find(query or {}).sort(sort_field, sort_order)
-    return [_hydrate_task(d) for d in docs]
+    """Batch-load tasks."""
+    users_cache = _load_all_users()
+    docs = list(tasks_col().find(query or {}).sort(sort_field, sort_order))
+
+    asset_ids = list({d['asset_id'] for d in docs if d.get('asset_id')})
+    assets_cache = {}
+    if asset_ids:
+        try:
+            types_cache = _load_all_types()
+            sites_cache = _load_all_sites()
+            for d in assets_col().find({'_id': {'$in': [ObjectId(i) for i in asset_ids]}}):
+                assets_cache[str(d['_id'])] = _hydrate_asset(d, types_cache, sites_cache, users_cache)
+        except Exception:
+            pass
+
+    return [_hydrate_task(d, assets_cache=assets_cache, users_cache=users_cache) for d in docs]
 
 
 # ── Estimate helpers ───────────────────────────────────────────────────────────
@@ -189,15 +294,29 @@ def _hydrate_estimate(doc):
     if doc is None:
         return None
     est = EstimateDoc(doc)
-    items_raw = est_items_col().find({'estimate_id': est.id}).sort('_id', ASCENDING)
+    users_cache = _load_all_users()
+    types_cache = _load_all_types()
+    sites_cache = _load_all_sites()
+
+    items_raw = list(est_items_col().find({'estimate_id': est.id}).sort('_id', ASCENDING))
+    asset_ids = list({d['asset_id'] for d in items_raw if d.get('asset_id')})
+    assets_cache = {}
+    if asset_ids:
+        try:
+            for d in assets_col().find({'_id': {'$in': [ObjectId(i) for i in asset_ids]}}):
+                assets_cache[str(d['_id'])] = _hydrate_asset(d, types_cache, sites_cache, users_cache)
+        except Exception:
+            pass
+
     items = []
     for item_doc in items_raw:
         item = EstimateItemDoc(item_doc)
-        item.set_ref('asset',    get_asset(item_doc.get('asset_id')) if item_doc.get('asset_id') else None)
+        item.set_ref('asset',    assets_cache.get(item_doc.get('asset_id')))
         item.set_ref('estimate', est)
         items.append(item)
+
     est.set_ref('items',      items)
-    est.set_ref('created_by', get_user(doc.get('created_by_id')) if doc.get('created_by_id') else None)
+    est.set_ref('created_by', users_cache.get(doc.get('created_by_id')))
     return est
 
 

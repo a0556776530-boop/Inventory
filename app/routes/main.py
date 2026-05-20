@@ -6,7 +6,8 @@ from flask_login import login_required
 
 from app.db import (
     assets_col, events_col, tasks_col, est_items_col, estimates_col,
-    get_asset_events, get_asset_type, all_settings, setting_set, setting_get,
+    get_asset_type, all_settings, setting_set, setting_get,
+    get_recent_events, _hydrate_asset,
 )
 
 main_bp = Blueprint('main', __name__)
@@ -85,14 +86,9 @@ def dashboard():
         .sort('quantity', 1)
         .limit(20)
     )
-    from app.db import _hydrate_asset
     low_stock_assets = [_hydrate_asset(d) for d in low_stock_docs]
 
-    recent_events_raw = (
-        events_col().find().sort('event_date', -1).limit(15)
-    )
-    from app.db import _hydrate_event
-    recent_events = [_hydrate_event(d) for d in recent_events_raw]
+    recent_events = get_recent_events(limit=15)
 
     # ── Chart: assets by status ───────────────────────────────────────────────
     all_statuses = ['in_use', 'dismantled', 'in_storage', 'assigned', 'faulty', 'retired']

@@ -13,7 +13,14 @@ def get_mongo_client():
         uri = os.environ.get("MONGO_URI")
         if not uri:
             raise RuntimeError("MONGO_URI לא מוגדר בקובץ .env")
-        _client = MongoClient(uri)
+        _client = MongoClient(
+            uri,
+            maxPoolSize=50,
+            minPoolSize=5,
+            maxIdleTimeMS=30000,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+        )
     return _client
 
 

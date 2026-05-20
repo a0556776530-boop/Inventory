@@ -41,4 +41,11 @@ if __name__ == '__main__':
             print('[Inventory] First run — seeded admin user and reference data.')
             print('[Inventory] Login: admin@inventory.app / admin1234')
 
+    import threading, webbrowser
+    chrome = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    try:
+        browser = webbrowser.get(f'"{chrome}" %s')
+    except Exception:
+        browser = webbrowser
+    threading.Timer(1.5, lambda: browser.open('http://127.0.0.1:5000')).start()
     app.run(debug=True, host='127.0.0.1', port=5000)

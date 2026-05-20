@@ -160,7 +160,8 @@
             {% set committed = commitments.get(asset.id, 0) %}
             {% set stock = asset.quantity if asset.quantity is not none else 0 %}
             {% set after = stock - committed %}
-            <tr class="{{ 'table-warning' if (asset.quantity is not none and asset.quantity < 5) else '' }}">
+            {% set redline = asset.min_threshold if asset.min_threshold is not none else 5 %}
+            <tr class="{{ 'table-danger bg-danger-subtle' if (asset.quantity is not none and asset.quantity <= redline) else '' }}">
 
               <!-- 1. Asset ID -->
               <td class="small font-monospace fw-semibold">
@@ -188,7 +189,7 @@
               <!-- 4. Stock Qty -->
               <td class="text-center small">
                 {% if asset.quantity is not none %}
-                  {% if asset.quantity < 5 %}
+                  {% if asset.quantity <= redline %}
                     <span class="fw-bold text-danger">{{ asset.quantity }}</span>
                   {% else %}
                     {{ asset.quantity }}
@@ -212,7 +213,7 @@
                 {% if asset.quantity is not none %}
                   {% if after <= 0 %}
                     <span class="badge bg-danger">{{ after }}</span>
-                  {% elif after < 5 %}
+                  {% elif after <= redline %}
                     <span class="fw-bold text-danger">{{ after }}</span>
                   {% else %}
                     {{ after }}
@@ -224,11 +225,12 @@
 
               <!-- 7. Red Line Alert -->
               <td class="text-center">
-                {% if asset.quantity is not none and asset.quantity < 5 %}
+                {% if asset.quantity is not none and asset.quantity <= redline %}
                 <div class="fw-bold text-danger fs-5 lh-1">{{ asset.quantity }}</div>
                 <span class="badge bg-danger-subtle text-danger border border-danger-subtle x-small mt-1">
                   <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ t.red_line_badge }}
                 </span>
+                <div class="text-muted x-small">min: {{ redline }}</div>
                 {% else %}
                 <span class="text-muted small">—</span>
                 {% endif %}

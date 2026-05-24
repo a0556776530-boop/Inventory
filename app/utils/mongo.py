@@ -15,11 +15,10 @@ def get_mongo_client():
             raise RuntimeError("MONGO_URI לא מוגדר בקובץ .env")
         _client = MongoClient(
             uri,
-            maxPoolSize=50,
-            minPoolSize=5,
-            maxIdleTimeMS=30000,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
+            maxPoolSize=10,
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=8000,
+            socketTimeoutMS=20000,
         )
     return _client
 

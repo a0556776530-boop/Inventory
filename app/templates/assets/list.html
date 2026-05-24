@@ -122,14 +122,10 @@
               <!-- 7. Red Line Alert -->
               <th class="text-center">{{ t.col_alert }}</th>
 
-              <!-- 8. Final Price (₪) -->
+              <!-- 8. Commission + Final Price (₪) -->
               <th>
                 <div class="d-flex align-items-center gap-1">
-                  <a href="?q={{ q }}&status={{ status_filter }}&type={{ type_filter or '' }}&site={{ site_filter or '' }}&sort=price_usd&order={{ 'desc' if sort == 'price_usd' and order == 'asc' else 'asc' }}"
-                     class="text-decoration-none text-dark d-flex align-items-center gap-1">
-                    {{ t.col_nis }}
-                    {% if sort == 'price_usd' %}<i class="bi bi-chevron-{{ 'up' if order == 'asc' else 'down' }} small"></i>{% endif %}
-                  </a>
+                  <span class="text-dark">עמלה / מחיר ₪</span>
                   <button class="btn btn-link btn-sm p-0 ms-1 text-muted border-0 lh-1"
                           id="priceToggleBtn"
                           data-show-label="{{ t.price_toggle_show }}"
@@ -236,10 +232,12 @@
                 {% endif %}
               </td>
 
-              <!-- 8. Final Price (₪) -->
+              <!-- 8. Commission + Final Price (₪) -->
               <td class="small font-monospace">
                 {% if asset.price_usd %}
-                <span class="price-cell" data-usd="{{ asset.price_usd|float }}">****</span>
+                {% set comm = asset.commission if asset.commission is not none else 1.7 %}
+                <span class="text-muted x-small">×{{ "%.2f"|format(comm|float) }}</span>
+                <span class="price-cell ms-1" data-usd="{{ asset.price_usd|float }}" data-comm="{{ comm|float }}">****</span>
                 {% else %}
                 <span class="text-muted">—</span>
                 {% endif %}
@@ -320,8 +318,9 @@
   var saveTimer = null;
   var csrf      = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
 
-  function calcILS(usd) {
-    return Math.round(usd * rate * 1.7 * 1.18 * 100) / 100;
+  function calcILS(usd, comm) {
+    var c = comm || 1.7;
+    return Math.round(usd * rate * c * 1.18 * 100) / 100;
   }
   function fmt(n) {
     return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₪';
@@ -329,10 +328,11 @@
 
   function repaint() {
     document.querySelectorAll('.price-cell').forEach(function (el) {
-      var usd = parseFloat(el.getAttribute('data-usd')) || 0;
+      var usd  = parseFloat(el.getAttribute('data-usd'))  || 0;
+      var comm = parseFloat(el.getAttribute('data-comm')) || 1.7;
       if (!usd) { el.textContent = '—'; el.classList.add('text-muted'); return; }
       el.classList.remove('text-muted');
-      el.textContent = visible ? fmt(calcILS(usd)) : '****';
+      el.textContent = visible ? fmt(calcILS(usd, comm)) : '****';
     });
   }
 

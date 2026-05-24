@@ -79,14 +79,15 @@
               </div>
             </div>
 
-            <!-- USD price -->
+            <!-- Commission (עמלה) -->
             <div class="col-md-4">
-              {{ form.price_usd.label(class="form-label fw-semibold") }}
+              {{ form.commission.label(class="form-label fw-semibold") }}
               <div class="input-group">
-                <span class="input-group-text">$</span>
-                {{ form.price_usd(class="form-control", type="number", step="1", min="0",
-                                   id="priceUsd", placeholder="0") }}
+                <span class="input-group-text">×</span>
+                {{ form.commission(class="form-control", type="number", step="0.01", min="0",
+                                   id="commissionInput", placeholder="1.70") }}
               </div>
+              <div class="form-text text-muted small">מכפיל עמלה — ברירת מחדל: 1.70</div>
             </div>
 
             <!-- NIS price (read-only, auto-computed) -->
@@ -99,9 +100,12 @@
                                    id="priceNis", placeholder="auto", readonly=true) }}
               </div>
               <div class="form-text text-muted small">
-                USD × rate × 1.18 VAT × 1.7 maintenance
+                USD × שער × עמלה × 1.18 מע"מ
               </div>
             </div>
+
+            <!-- USD price (hidden input — kept for DB compatibility) -->
+            {{ form.price_usd(id="priceUsd", type="hidden") }}
 
             <!-- Stock Qty -->
             <div class="col-md-4">
@@ -163,11 +167,11 @@
   // Example: $20 @ 3.00 → (20 × 3) × 1.7 × 1.18 = 120.36 ₪
   let rate = 3.0;
 
-  const rateValueLabel = document.getElementById('rateValueLabel');
-  const usdInput       = document.getElementById('priceUsd');
-  const nisInput       = document.getElementById('priceNis');
+  const rateValueLabel   = document.getElementById('rateValueLabel');
+  const usdInput         = document.getElementById('priceUsd');
+  const nisInput         = document.getElementById('priceNis');
+  const commissionInput  = document.getElementById('commissionInput');
 
-  // Load rate from server (single source of truth — no localStorage)
   fetch('/api/settings')
     .then(r => r.json())
     .then(data => {
@@ -179,14 +183,14 @@
     .catch(() => { recalcNis(); });
 
   function recalcNis() {
-    const usd = parseFloat(usdInput ? usdInput.value : '') || 0;
+    const usd  = parseFloat(usdInput ? usdInput.value : '') || 0;
+    const comm = parseFloat(commissionInput ? commissionInput.value : '') || 1.7;
     if (!usd) { if (nisInput) nisInput.value = ''; return; }
-    // (USD × Rate) × 1.7 × 1.18 — rounded to 2 decimal places
-    const nis = Math.round(usd * rate * 1.7 * 1.18 * 100) / 100;
+    const nis = Math.round(usd * rate * comm * 1.18 * 100) / 100;
     if (nisInput) nisInput.value = nis;
   }
 
-  if (usdInput) usdInput.addEventListener('input', recalcNis);
+  if (commissionInput) commissionInput.addEventListener('input', recalcNis);
 
   recalcNis();
 

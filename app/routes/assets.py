@@ -58,6 +58,7 @@ class AssetForm(FlaskForm):
     notes      = TextAreaField('Notes',        validators=[Optional()])
     price_usd  = DecimalField('Price USD ($)', validators=[Optional(), NumberRange(min=0)], places=0)
     price_nis  = DecimalField('Price NIS (₪)', validators=[Optional(), NumberRange(min=0)], places=0)
+    commission    = DecimalField('Commission (עמלה)', validators=[Optional(), NumberRange(min=0)], places=2, default=1.7)
     quantity      = IntegerField('Stock Qty',    validators=[Optional(), NumberRange(min=0)])
     min_threshold = IntegerField('Min Threshold', validators=[Optional(), NumberRange(min=0)])
     submit        = SubmitField('Save Asset')
@@ -220,6 +221,7 @@ def new_asset():
                 'notes':          (form.notes.data or '').strip() or None,
                 'price_usd':      float(form.price_usd.data) if form.price_usd.data is not None else None,
                 'price_nis':      float(form.price_nis.data) if form.price_nis.data is not None else None,
+                'commission':     float(form.commission.data) if form.commission.data is not None else 1.7,
                 'quantity':       form.quantity.data,
                 'min_threshold':  form.min_threshold.data,
                 'created_at':     datetime.utcnow(),
@@ -307,6 +309,7 @@ def edit(id):
                 'notes':         (form.notes.data or '').strip() or None,
                 'price_usd':     float(form.price_usd.data) if form.price_usd.data is not None else None,
                 'price_nis':     float(form.price_nis.data) if form.price_nis.data is not None else None,
+                'commission':    float(form.commission.data) if form.commission.data is not None else 1.7,
                 'quantity':      form.quantity.data,
                 'min_threshold': form.min_threshold.data,
                 'updated_at':    datetime.utcnow(),

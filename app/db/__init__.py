@@ -32,21 +32,27 @@ def settings_col():     return _col('app_settings')
 
 
 def ensure_indexes():
-    """Create indexes on first run."""
-    assets_col().create_index('serial_number', unique=True, sparse=True)
-    assets_col().create_index('barcode',        unique=True, sparse=True)
-    assets_col().create_index('status')
-    assets_col().create_index('asset_type_id')
-    assets_col().create_index('current_site_id')
-    assets_col().create_index('assigned_to_id')
-    assets_col().create_index('quantity')
-    events_col().create_index('asset_id')
-    events_col().create_index([('event_date', DESCENDING)])
-    tasks_col().create_index('assigned_to_id')
-    tasks_col().create_index('status')
-    estimates_col().create_index('status')
-    est_items_col().create_index('estimate_id')
-    est_items_col().create_index('asset_id')
+    """Create indexes — safe to call multiple times."""
+    def _idx(col, *args, **kwargs):
+        try:
+            col.create_index(*args, **kwargs)
+        except Exception:
+            pass
+
+    _idx(assets_col(),    'serial_number',  unique=True, sparse=True)
+    _idx(assets_col(),    'barcode',        unique=True, sparse=True)
+    _idx(assets_col(),    'status')
+    _idx(assets_col(),    'asset_type_id')
+    _idx(assets_col(),    'current_site_id')
+    _idx(assets_col(),    'assigned_to_id')
+    _idx(assets_col(),    'quantity')
+    _idx(events_col(),    'asset_id')
+    _idx(events_col(),    [('event_date', DESCENDING)])
+    _idx(tasks_col(),     'assigned_to_id')
+    _idx(tasks_col(),     'status')
+    _idx(estimates_col(), 'status')
+    _idx(est_items_col(), 'estimate_id')
+    _idx(est_items_col(), 'asset_id')
 
 
 # ── Batch reference caches ─────────────────────────────────────────────────────
